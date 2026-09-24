@@ -9,7 +9,7 @@ mkdir -p "$APP/Contents/MacOS"
 
 swiftc -O -swift-version 5 -module-cache-path build/ModuleCache -target arm64-apple-macos13.0 \
   -o "$APP/Contents/MacOS/StreamCamBar" Sources/StreamCamBar/*.swift \
-  -framework IOKit -framework CoreMediaIO -framework ServiceManagement
+  -framework IOKit -framework ServiceManagement
 
 cat > "$APP/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>

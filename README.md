@@ -17,8 +17,9 @@ from the menu at the top of the panel. Tweak a profile's settings and hit **Upda
 Give a profile an auto-switch time and it's applied automatically when that time passes — also on
 launch/wake if you missed it. Picking a profile by hand sticks until the next scheduled time.
 
-Settings you change are saved and (optionally) re-applied when the camera is plugged in,
-when the Mac wakes, and when an app starts using the camera.
+Settings you change are saved and (optionally) re-applied when the camera is plugged in
+and when the Mac wakes. The StreamCam can drop them when a call app starts the camera —
+if the picture looks off, hit **Re-apply**.
 
 ## Build
 ```sh

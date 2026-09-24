@@ -10,7 +10,6 @@ let package = Package(
             name: "StreamCamBar",
             linkerSettings: [
                 .linkedFramework("IOKit"),
-                .linkedFramework("CoreMediaIO"),
                 .linkedFramework("ServiceManagement"),
             ]
         )

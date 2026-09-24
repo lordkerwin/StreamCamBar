@@ -1,11 +1,13 @@
 import AppKit
-import CoreMediaIO
 import Foundation
 import IOKit
+import OSLog
 import ServiceManagement
 
 let targetVendorID = 0x046d  // Logitech
 let targetProductID = 0x0893 // StreamCam
+
+private let log = Logger(subsystem: "dev.seankerwin.StreamCamBar", category: "camera")
 
 @MainActor
 final class CameraModel: ObservableObject {
@@ -35,8 +37,6 @@ final class CameraModel: ObservableObject {
     private let io = DispatchQueue(label: "uvc.io")
     private var notifyPort: IONotificationPortRef?
     private var reconnectWork: DispatchWorkItem?
-    private var cmioDevice: CMIOObjectID = 0
-    private var wasRunning = false
 
     private var saved: [String: Int] {
         get { UserDefaults.standard.dictionary(forKey: "saved") as? [String: Int] ?? [:] }
@@ -101,7 +101,6 @@ final class CameraModel: ObservableObject {
                     self.ranges = ranges
                     self.values = values
                     self.autoExposureValue = autoAE
-                    self.watchStreaming()
                     if !self.checkSchedule(), self.restoreSettings { self.reapply() }
                 case .failure(let error):
                     self.device = nil
@@ -130,28 +129,6 @@ final class CameraModel: ObservableObject {
             }, refcon, &iter)
             drain(iter) // arm the notification
         }
-    }
-
-    // Some apps reset UVC controls when they start the stream; re-apply when the camera goes live.
-    private func watchStreaming() {
-        let id = findCMIODevice()
-        guard id != 0, id != cmioDevice else { return }
-        cmioDevice = id
-        var addr = CMIOObjectPropertyAddress(
-            mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceIsRunningSomewhere),
-            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeWildcard),
-            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementWildcard))
-        CMIOObjectAddPropertyListenerBlock(id, &addr, DispatchQueue.main) { [weak self] _, _ in
-            MainActor.assumeIsolated { self?.streamingChanged() }
-        }
-        wasRunning = isRunning(id)
-    }
-
-    private func streamingChanged() {
-        let running = isRunning(cmioDevice)
-        defer { wasRunning = running }
-        guard running, !wasRunning, restoreSettings else { return }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { [weak self] in self?.reapply() }
     }
 
     // MARK: - Controls
@@ -193,9 +170,11 @@ final class CameraModel: ObservableObject {
     private func apply(_ settings: [String: Int]) {
         guard let device else { return }
         let order = Self.applyOrder.filter { !Self.isOverriddenByAuto($0, in: settings) }
+        log.notice("applying \(settings.count) settings: \(settings.description, privacy: .public)")
         io.async {
             for spec in order {
-                if let v = settings[spec.key] { try? device.set(spec, v) }
+                guard let v = settings[spec.key] else { continue }
+                do { try device.set(spec, v) } catch { log.error("set \(spec.key, privacy: .public)=\(v) failed: \(String(describing: error), privacy: .public)") }
             }
         }
         refresh(after: 0.3)
@@ -292,43 +271,4 @@ final class CameraModel: ObservableObject {
 
 private func drain(_ iter: io_iterator_t) {
     while case let s = IOIteratorNext(iter), s != 0 { IOObjectRelease(s) }
-}
-
-private func findCMIODevice() -> CMIOObjectID {
-    var addr = CMIOObjectPropertyAddress(
-        mSelector: CMIOObjectPropertySelector(kCMIOHardwarePropertyDevices),
-        mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-        mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-    var size: UInt32 = 0
-    guard CMIOObjectGetPropertyDataSize(CMIOObjectID(kCMIOObjectSystemObject), &addr, 0, nil, &size) == 0 else { return 0 }
-    var ids = [CMIOObjectID](repeating: 0, count: Int(size) / MemoryLayout<CMIOObjectID>.size)
-    var used: UInt32 = 0
-    guard CMIOObjectGetPropertyData(CMIOObjectID(kCMIOObjectSystemObject), &addr, 0, nil, size, &used, &ids) == 0 else { return 0 }
-    // CMIO model UIDs embed the USB IDs, e.g. "UVC Camera VendorID_1133 ProductID_2195".
-    let needle = "VendorID_\(targetVendorID) ProductID_\(targetProductID)"
-    for id in ids {
-        var modelAddr = CMIOObjectPropertyAddress(
-            mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyModelUID),
-            mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeGlobal),
-            mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementMain))
-        var model: Unmanaged<CFString>?
-        var got: UInt32 = 0
-        let ok = withUnsafeMutablePointer(to: &model) {
-            CMIOObjectGetPropertyData(id, &modelAddr, 0, nil, UInt32(MemoryLayout<CFString?>.size), &got, $0)
-        }
-        if ok == 0, let m = model?.takeRetainedValue() as String?, m.contains(needle) { return id }
-    }
-    return 0
-}
-
-private func isRunning(_ id: CMIOObjectID) -> Bool {
-    guard id != 0 else { return false }
-    var addr = CMIOObjectPropertyAddress(
-        mSelector: CMIOObjectPropertySelector(kCMIODevicePropertyDeviceIsRunningSomewhere),
-        mScope: CMIOObjectPropertyScope(kCMIOObjectPropertyScopeWildcard),
-        mElement: CMIOObjectPropertyElement(kCMIOObjectPropertyElementWildcard))
-    var running: UInt32 = 0
-    var got: UInt32 = 0
-    CMIOObjectGetPropertyData(id, &addr, 0, nil, UInt32(MemoryLayout<UInt32>.size), &got, &running)
-    return running != 0
 }

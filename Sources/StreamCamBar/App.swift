@@ -123,7 +123,7 @@ struct ControlPanel: View {
 
     private var footer: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Toggle("Restore my settings on connect, wake & call start", isOn: $model.restoreSettings)
+            Toggle("Restore my settings on connect & wake", isOn: $model.restoreSettings)
             HStack {
                 Button("Reset to defaults") { model.resetToDefaults() }
                 Button("Re-apply") { model.reapply() }
