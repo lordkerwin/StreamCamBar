@@ -17,6 +17,18 @@ final class CameraModel: ObservableObject {
     @Published var restoreSettings: Bool {
         didSet { UserDefaults.standard.set(restoreSettings, forKey: "restoreSettings") }
     }
+    @Published private(set) var profiles: [Profile] = [] {
+        didSet { UserDefaults.standard.set(try? JSONEncoder().encode(profiles), forKey: "profiles") }
+    }
+    @Published private(set) var activeProfileID: UUID? {
+        didSet { UserDefaults.standard.set(activeProfileID?.uuidString, forKey: "activeProfile") }
+    }
+    /// Last profile the schedule switched to, so a manual pick sticks until the next boundary.
+    private var lastScheduledID: UUID? {
+        get { UserDefaults.standard.string(forKey: "lastScheduled").flatMap(UUID.init) }
+        set { UserDefaults.standard.set(newValue?.uuidString, forKey: "lastScheduled") }
+    }
+    private var scheduleTimer: Timer?
 
     private var device: UVCDevice?
     private var autoExposureValue = 8
@@ -38,6 +50,12 @@ final class CameraModel: ObservableObject {
 
     init() {
         restoreSettings = UserDefaults.standard.object(forKey: "restoreSettings") as? Bool ?? true
+        profiles = UserDefaults.standard.data(forKey: "profiles")
+            .flatMap { try? JSONDecoder().decode([Profile].self, from: $0) } ?? []
+        activeProfileID = UserDefaults.standard.string(forKey: "activeProfile").flatMap(UUID.init)
+        scheduleTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { _ = self?.checkSchedule() }
+        }
         watchUSB()
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
@@ -84,7 +102,7 @@ final class CameraModel: ObservableObject {
                     self.values = values
                     self.autoExposureValue = autoAE
                     self.watchStreaming()
-                    if self.restoreSettings { self.reapply() }
+                    if !self.checkSchedule(), self.restoreSettings { self.reapply() }
                 case .failure(let error):
                     self.device = nil
                     self.connected = false
@@ -170,21 +188,84 @@ final class CameraModel: ObservableObject {
         }
     }
 
-    func reapply() {
+    func reapply() { apply(saved) }
+
+    private func apply(_ settings: [String: Int]) {
         guard let device else { return }
-        let saved = self.saved
-        let order = Self.applyOrder
+        let order = Self.applyOrder.filter { !Self.isOverriddenByAuto($0, in: settings) }
         io.async {
             for spec in order {
-                if let v = saved[spec.key] { try? device.set(spec, v) }
+                if let v = settings[spec.key] { try? device.set(spec, v) }
             }
         }
         refresh(after: 0.3)
     }
 
+    /// Manual values are meaningless (and rejected by the camera) while their auto mode is on.
+    private static func isOverriddenByAuto(_ spec: UVCControlSpec, in s: [String: Int]) -> Bool {
+        switch spec {
+        case .exposureTime, .gain: return (s[UVCControlSpec.autoExposureMode.key] ?? 1) != 1
+        case .whiteBalance: return (s[UVCControlSpec.autoWhiteBalance.key] ?? 0) != 0
+        case .focus: return (s[UVCControlSpec.autoFocus.key] ?? 0) != 0
+        default: return false
+        }
+    }
+
+    // MARK: - Profiles
+
+    var activeProfile: Profile? { profiles.first { $0.id == activeProfileID } }
+
+    /// True when the camera no longer matches the active profile (ignoring values auto modes drive).
+    var activeProfileModified: Bool {
+        guard let p = activeProfile else { return false }
+        return UVCControlSpec.all.contains { spec in
+            !Self.isOverriddenByAuto(spec, in: p.values) && p.values[spec.key] != nil
+                && values[spec.key] != nil && p.values[spec.key] != values[spec.key]
+        }
+    }
+
+    func applyProfile(_ profile: Profile) {
+        activeProfileID = profile.id
+        saved = profile.values
+        values.merge(profile.values) { $1 }
+        apply(profile.values)
+    }
+
+    func saveProfile(named name: String) {
+        let profile = Profile(name: name, values: values)
+        profiles.append(profile)
+        activeProfileID = profile.id
+    }
+
+    func updateActiveProfile() {
+        guard let i = profiles.firstIndex(where: { $0.id == activeProfileID }) else { return }
+        profiles[i].values = values
+    }
+
+    func deleteActiveProfile() {
+        profiles.removeAll { $0.id == activeProfileID }
+        activeProfileID = nil
+    }
+
+    func setSchedule(_ minutes: Int?) {
+        guard let i = profiles.firstIndex(where: { $0.id == activeProfileID }) else { return }
+        profiles[i].startMinutes = minutes
+        lastScheduledID = Profile.scheduled(in: profiles)?.id // don't jump profiles just for editing a time
+    }
+
+    /// Switches to the scheduled profile when a start time has passed. Returns true if it applied one.
+    @discardableResult
+    private func checkSchedule() -> Bool {
+        guard device != nil, let due = Profile.scheduled(in: profiles), due.id != lastScheduledID else { return false }
+        lastScheduledID = due.id
+        applyProfile(due)
+        return true
+    }
+
     func resetToDefaults() {
         guard let device else { return }
         saved = [:]
+        activeProfileID = nil
         let ranges = self.ranges
         let autoAE = autoExposureValue
         io.async {

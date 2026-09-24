@@ -22,6 +22,7 @@ struct ControlPanel: View {
         VStack(alignment: .leading, spacing: 12) {
             header
             if model.connected {
+                ProfileBar(model: model)
                 Divider()
                 exposureSection
                 Divider()
@@ -158,8 +159,7 @@ struct ControlSlider: View {
             Text(label).frame(width: 72, alignment: .leading)
             Slider(
                 value: Binding(get: { Double(model.value(spec)) }, set: { model.set(spec, Int($0.rounded())) }),
-                in: Double(r.min)...Double(max(r.max, r.min + 1)),
-                step: Double(max(r.res, 1)))
+                in: Double(r.min)...Double(max(r.max, r.min + 1)))
                 .controlSize(.small)
             Text(format(model.value(spec))).monospacedDigit().frame(width: 48, alignment: .trailing)
                 .foregroundStyle(.secondary)
@@ -193,4 +193,87 @@ struct LogSlider: View {
 
 extension Array {
     subscript(safe i: Int) -> Element? { indices.contains(i) ? self[i] : nil }
+}
+
+struct ProfileBar: View {
+    @ObservedObject var model: CameraModel
+    @State private var naming = false
+    @State private var newName = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Menu {
+                    ForEach(model.profiles) { p in
+                        Button { model.applyProfile(p) } label: {
+                            if p.id == model.activeProfileID { Label(p.name, systemImage: "checkmark") } else { Text(p.name) }
+                        }
+                    }
+                    if !model.profiles.isEmpty { Divider() }
+                    Button("Save Current as New Profile…") { newName = ""; naming = true }
+                    if let active = model.activeProfile {
+                        Button("Update “\(active.name)”") { model.updateActiveProfile() }
+                        Button("Delete “\(active.name)”") { model.deleteActiveProfile() }
+                    }
+                } label: {
+                    Label(menuTitle, systemImage: "slider.horizontal.3")
+                }
+                .fixedSize()
+                Spacer()
+                if model.activeProfileModified {
+                    Button("Update") { model.updateActiveProfile() }.controlSize(.small)
+                }
+            }
+
+            if naming {
+                HStack {
+                    TextField("Profile name, e.g. Daytime", text: $newName).onSubmit(save)
+                    Button("Save", action: save).disabled(newName.trimmingCharacters(in: .whitespaces).isEmpty)
+                    Button("Cancel") { naming = false }
+                }
+                .controlSize(.small)
+            }
+
+            if let active = model.activeProfile {
+                HStack {
+                    Toggle("Auto-switch to this profile at", isOn: Binding(
+                        get: { active.startMinutes != nil },
+                        set: { model.setSchedule($0 ? currentMinutes() : nil) }))
+                    Spacer()
+                    if let minutes = active.startMinutes {
+                        DatePicker("", selection: Binding(
+                            get: { dateFrom(minutes: minutes) },
+                            set: { model.setSchedule(minutesFrom($0)) }),
+                            displayedComponents: .hourAndMinute)
+                            .labelsHidden()
+                    }
+                }
+                .controlSize(.small)
+                .font(.callout)
+            }
+        }
+    }
+
+    private var menuTitle: String {
+        guard let active = model.activeProfile else { return model.profiles.isEmpty ? "Profiles" : "No profile" }
+        return model.activeProfileModified ? "\(active.name) (modified)" : active.name
+    }
+
+    private func save() {
+        let name = newName.trimmingCharacters(in: .whitespaces)
+        guard !name.isEmpty else { return }
+        model.saveProfile(named: name)
+        naming = false
+    }
+}
+
+private func currentMinutes() -> Int { minutesFrom(Date()) }
+
+private func minutesFrom(_ date: Date) -> Int {
+    let c = Calendar.current.dateComponents([.hour, .minute], from: date)
+    return (c.hour ?? 0) * 60 + (c.minute ?? 0)
+}
+
+private func dateFrom(minutes: Int) -> Date {
+    Calendar.current.date(bySettingHour: minutes / 60, minute: minutes % 60, second: 0, of: Date()) ?? Date()
 }
